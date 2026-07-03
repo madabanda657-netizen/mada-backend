@@ -1,23 +1,16 @@
-const admin = require("firebase-admin");
-
 module.exports = async (req, res) => {
-    // Allow your website to talk to this server
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
         const { uid, amount, phone } = req.body;
 
-        if (!uid) {
-            return res.status(400).json({ success: false, message: "No UID received" });
-        }
+        if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
 
-        // --- 1. PAYCHANGU DIRECT MOBILE MONEY ---
+        // --- SEND PROMPT TO PAYCHANGU ---
         const PAYCHANGU_URL = "https://api.paychangu.com/mobile-money/direct-charge";
 
         const pchResponse = await fetch(PAYCHANGU_URL, {
@@ -41,32 +34,14 @@ module.exports = async (req, res) => {
             return res.status(400).json({ success: false, message: pchData.message || JSON.stringify(pchData) });
         }
 
-        // --- 2. FIREBASE DATABASE UPDATE ---
-        if (admin.apps.length === 0) {
-            const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount),
-                databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
-            });
-        }
-
-        const db = admin.database();
-        const userRef = db.ref(`leaderboard_all/${uid}`);
-        const snapshot = await userRef.child('mwk').once('value');
-        const currentMwk = snapshot.val() || 0;
-
-        await userRef.update({
-            mwk: currentMwk + Number(amount)
-        });
-
+        // We DO NOT add the money here anymore. The Webhook will do it!
         return res.status(200).json({
             success: true,
-            message: "Prompt sent to phone and Firebase balance updated",
-            paychangu: pchData
+            message: "Prompt sent to phone. Waiting for user to enter PIN..."
         });
 
     } catch (error) {
         console.error("Error:", error);
         return res.status(500).json({ success: false, message: error.message });
     }
-};
+}; 
