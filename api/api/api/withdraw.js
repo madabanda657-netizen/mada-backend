@@ -1,3 +1,4 @@
+const fetch = require('node-fetch');
 const admin = require("firebase-admin");
 
 module.exports = async (req, res) => {
