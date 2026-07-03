@@ -9,10 +9,8 @@ module.exports = async (req, res) => {
 
     try {
         const { uid, amount } = req.body;
-
         if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
 
-        // Initialize Firebase
         if (admin.apps.length === 0) {
             const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
             admin.initializeApp({
@@ -22,21 +20,14 @@ module.exports = async (req, res) => {
         }
 
         const db = admin.database();
-        
-        // 1. Get the user's phone number from Firebase
         const userSnap = await db.ref(`users/${uid}`).once('value');
         const userData = userSnap.val() || {};
         
-        // Convert stored phone (e.g., 099...) to 26599...
         let phone = userData.phone || "";
         phone = phone.replace(/^0/, "265"); 
         
-        if (!phone) {
-            return res.status(400).json({ success: false, message: "User has no phone number on file." });
-        }
+        if (!phone) return res.status(400).json({ success: false, message: "User has no phone number on file." });
 
-        // 2. Send Payout to PayChangu
-        // NOTE: This is PayChangu's Mobile Money payout URL. 
         const PAYCHANGU_PAYOUT_URL = "https://api.paychangu.com/mobile-money/payout"; 
 
         const pchResponse = await fetch(PAYCHANGU_PAYOUT_URL, {
@@ -48,7 +39,7 @@ module.exports = async (req, res) => {
             body: JSON.stringify({
                 amount: Number(amount),
                 currency: "MWK",
-                phone: phone,
+                mobile: phone,
                 reference: "MADA_WITHDRAW_" + uid,
                 network: phone.startsWith("26599") || phone.startsWith("26598") ? "airtel" : "tnm"
             })
@@ -57,14 +48,10 @@ module.exports = async (req, res) => {
         const pchData = await pchResponse.json();
 
         if (!pchResponse.ok || pchData.status !== 'success') {
-            // If this fails, your HTML will automatically refund the user's balance
             return res.status(400).json({ success: false, message: pchData.message || JSON.stringify(pchData) });
         }
 
-        return res.status(200).json({
-            success: true,
-            message: "Withdrawal sent to user's phone!"
-        });
+        return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
 
     } catch (error) {
         console.error("Withdraw Error:", error);
