@@ -17,29 +17,28 @@ module.exports = async (req, res) => {
             return res.status(400).json({ success: false, message: "No UID received" });
         }
 
-        // --- 1. ONEKHUSA PAYMENT ---
-        const BASE = "https://api.onekhusa.com/sandbox/v1";
+        // --- 1. PAYCHANGU DIRECT MOBILE MONEY ---
+        const PAYCHANGU_URL = "https://api.paychangu.com/mobile-money/direct-charge";
 
-        const okResponse = await fetch(`${BASE}/collections/request-to-pay`, {
+        const pchResponse = await fetch(PAYCHANGU_URL, {
             method: 'POST',
             headers: {
-                "Authorization": `Bearer ${process.env.ONEKHUSA_API_KEY}`,
-                "Content-Type": "application/json",
-                "Organisation-Id": "ED2CNRTKH36J",        
-                "Merchant-Account-Number": "73229537"      
+                "Authorization": `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+                "Content-Type": "application/json"
             },
             body: JSON.stringify({
                 amount: Number(amount),
+                currency: "MWK",
                 phone: phone,
                 reference: "MADA_DEPOSIT_" + uid,
-                description: "Mada test"
+                network: phone.startsWith("26599") || phone.startsWith("26598") ? "airtel" : "tnm"
             })
         });
 
-        const okData = await okResponse.json();
+        const pchData = await pchResponse.json();
 
-        if (!okResponse.ok || (okData.status && okData.status !== 'success')) {
-            return res.status(400).json({ success: false, message: okData.message || JSON.stringify(okData) });
+        if (!pchResponse.ok || pchData.status !== 'success') {
+            return res.status(400).json({ success: false, message: pchData.message || JSON.stringify(pchData) });
         }
 
         // --- 2. FIREBASE DATABASE UPDATE ---
@@ -63,7 +62,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Prompt sent to phone and Firebase balance updated",
-            onekhusa: okData
+            paychangu: pchData
         });
 
     } catch (error) {
