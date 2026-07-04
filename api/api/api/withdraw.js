@@ -24,14 +24,22 @@ module.exports = async (req, res) => {
         const userSnap = await db.ref(`users/${uid}`).once('value');
         const userData = userSnap.val() || {};
         
+        // Safely format phone number to 265XXXXXXXXX
         let phone = userData.phone || "";
-        phone = phone.replace(/^0/, "265"); 
+        phone = phone.replace(/[^0-9]/g, ''); // remove all non-digits
+        if (phone.startsWith("265")) {
+            // already correct
+        } else if (phone.startsWith("0")) {
+            phone = "265" + phone.substring(1);
+        }
         
         if (!phone) return res.status(400).json({ success: false, message: "User has no phone number on file." });
 
+        // PawaPay requires IDs to only contain letters, numbers, and hyphens.
+        const cleanUid = uid.replace(/[^a-zA-Z0-9]/g, '');
         const PAWAPAY_URL = "https://api.sandbox.pawapay.io/payouts";
         const network = phone.startsWith("26599") || phone.startsWith("26598") ? "AIRTEL_MALAWI" : "TNM_MPAMBA";
-        const payoutId = "MADA_WD_" + uid + "_" + Date.now();
+        const payoutId = "MADA-WD-" + cleanUid + "-" + Date.now();
 
         const pawaResponse = await fetch(PAWAPAY_URL, {
             method: 'POST',
@@ -64,7 +72,13 @@ module.exports = async (req, res) => {
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
         } else {
-            const errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
+            // PawaPay returns errors inside an array called 'errors'
+            let errMsg = "Unknown PawaPay Error";
+            if (pawaData.errors && pawaData.errors.length > 0) {
+                errMsg = pawaData.errors[0].errorMessage + " - " + pawaData.errors[0].errorDetails;
+            } else {
+                errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
+            }
             return res.status(400).json({ success: false, message: errMsg });
         }
 
