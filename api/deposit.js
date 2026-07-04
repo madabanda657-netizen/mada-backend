@@ -31,6 +31,7 @@ module.exports = async (req, res) => {
                     type: "MSISDN", 
                     address: { value: phone } 
                 },
+                customerTimestamp: Date.now(),
                 statementDescription: "Mada Game Deposit"
             })
         });
@@ -46,7 +47,6 @@ module.exports = async (req, res) => {
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Prompt sent to phone." });
         } else {
-            // Extract the exact error message from PawaPay
             const errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
             return res.status(400).json({ success: false, message: errMsg });
         }
