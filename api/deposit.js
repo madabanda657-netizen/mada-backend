@@ -27,17 +27,26 @@ module.exports = async (req, res) => {
                 amount: String(amount) + ".00",
                 currency: "MWK",
                 correspondent: network,
-                payer: { type: "MSISDN", value: phone },
+                payer: { 
+                    type: "MSISDN", 
+                    address: { value: phone } 
+                },
                 statementDescription: "Mada Game Deposit"
             })
         });
 
-        const pawaData = await pawaResponse.json();
+        const textResponse = await pawaResponse.text();
+        let pawaData;
+        try {
+            pawaData = JSON.parse(textResponse);
+        } catch (e) {
+            return res.status(400).json({ success: false, message: "PawaPay Error: " + textResponse.substring(0, 100) });
+        }
 
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Prompt sent to phone." });
         } else {
-            return res.status(400).json({ success: false, message: pawaData.message || JSON.stringify(pawaData) });
+            return res.status(400).json({ success: false, message: pawaData.detail || pawaData.message || JSON.stringify(pawaData) });
         }
 
     } catch (error) {
