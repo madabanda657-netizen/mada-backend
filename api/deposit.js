@@ -1,65 +1,64 @@
 const fetch = require('node-fetch');
 
 module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    
-    if (req.method === 'OPTIONS') return res.status(200).end();
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-    try {
-        const { uid, amount, phone } = req.body;
-        if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
+  try {
+    const { uid, amount, phone: rawPhone } = req.body;
+    if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
 
-        // PawaPay requires IDs to only contain letters, numbers, and hyphens.
-        const cleanUid = uid.replace(/[^a-zA-Z0-9]/g, '');
-        const PAWAPAY_URL = "https://api.sandbox.pawapay.io/deposits";
-        const network = phone.startsWith("26599") || phone.startsWith("26598") ? "AIRTEL_MALAWI" : "TNM_MPAMBA";
-        
-        const depositId = "MADA-DEP-" + cleanUid + "-" + Date.now();
+    // --- clean phone to 265XXXXXXXXX ---
+    let phone = String(rawPhone || '').replace(/[^0-9]/g, '');
+    if (phone.startsWith('0')) phone = '265' + phone.slice(1);
+    if (!phone.startsWith('265')) phone = '265' + phone;
 
-        const pawaResponse = await fetch(PAWAPAY_URL, {
-            method: 'POST',
-            headers: {
-                "Authorization": `Bearer ${process.env.PAWAPAY_API_TOKEN}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                depositId: depositId,
-                amount: String(amount) + ".00",
-                currency: "MWK",
-                correspondent: network,
-                payer: { 
-                    type: "MSISDN", 
-                    address: { value: phone } 
-                },
-                customerTimestamp: Date.now(),
-                statementDescription: "Mada Game Deposit"
-            })
-        });
+    const cleanUid = uid.replace(/[^a-zA-Z0-9]/g, '');
+    const PAWAPAY_URL = "https://api.sandbox.pawapay.io/v2/deposits";
 
-        const textResponse = await pawaResponse.text();
-        let pawaData;
-        try {
-            pawaData = JSON.parse(textResponse);
-        } catch (e) {
-            return res.status(400).json({ success: false, message: "PawaPay Error: " + textResponse.substring(0, 150) });
-        }
+    // correct Malawi correspondents
+    const isAirtel = phone.startsWith('26599') || phone.startsWith('26598') || phone.startsWith('26588');
+    const network = isAirtel? 'AIRTEL_MWI' : 'TNM_MWI';
 
-        if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
-            return res.status(200).json({ success: true, message: "Prompt sent to phone." });
-        } else {
-            // PawaPay returns errors inside an array called 'errors'
-            let errMsg = "Unknown PawaPay Error";
-            if (pawaData.errors && pawaData.errors.length > 0) {
-                errMsg = pawaData.errors[0].errorMessage + " - " + pawaData.errors[0].errorDetails;
-            } else {
-                errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
-            }
-            return res.status(400).json({ success: false, message: errMsg });
-        }
+    const depositId = `MADA-DEP-${cleanUid}-${Date.now()}`;
+    const amountStr = String(Math.round(Number(amount))); // "50" not "50.00"
 
-    } catch (error) {
-        return res.status(500).json({ success: false, message: error.message });
+    const pawaResponse = await fetch(PAWAPAY_URL, {
+      method: 'POST',
+      headers: {
+        "Authorization": `Bearer ${process.env.PAWAPAY_API_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        depositId,
+        amount: amountStr,
+        currency: "MWK",
+        correspondent: network,
+        payer: {
+          type: "MSISDN",
+          address: { value: phone }
+        },
+        customerTimestamp: new Date().toISOString(),
+        statementDescription: "Mada Game Deposit"
+      })
+    });
+
+    const text = await pawaResponse.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { return res.status(400).json({ success: false, message: "PawaPay: " + text.slice(0,150) }); }
+
+    if (pawaResponse.ok && (data.status === 'ACCEPTED' || data.status === 'SUBMITTED')) {
+      return res.status(200).json({ success: true, message: "Prompt sent to phone." });
     }
-};
+
+    const err = data.errors?.[0];
+    const msg = err? `${err.errorMessage} - ${err.errorDetails}` : (data.message || text);
+    return res.status(400).json({ success: false, message: msg });
+
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}; 
