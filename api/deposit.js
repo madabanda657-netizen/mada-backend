@@ -40,16 +40,18 @@ module.exports = async (req, res) => {
         try {
             pawaData = JSON.parse(textResponse);
         } catch (e) {
-            return res.status(400).json({ success: false, message: "PawaPay Error: " + textResponse.substring(0, 100) });
+            return res.status(400).json({ success: false, message: "PawaPay Error: " + textResponse.substring(0, 150) });
         }
 
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Prompt sent to phone." });
         } else {
-            return res.status(400).json({ success: false, message: pawaData.detail || pawaData.message || JSON.stringify(pawaData) });
+            // Extract the exact error message from PawaPay
+            const errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
+            return res.status(400).json({ success: false, message: errMsg });
         }
 
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
-}; 
+};
