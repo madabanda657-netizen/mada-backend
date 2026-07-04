@@ -29,33 +29,35 @@ module.exports = async (req, res) => {
         
         if (!phone) return res.status(400).json({ success: false, message: "User has no phone number on file." });
 
-        const PAYCHANGU_PAYOUT_URL = "https://api.paychangu.com/mobile-money/payout"; 
+        const PAWAPAY_URL = "https://api.sandbox.pawapay.io/payouts";
+        const network = phone.startsWith("26599") || phone.startsWith("26598") ? "AIRTEL_MALAWI" : "TNM_MPAMBA";
+        const payoutId = "MADA_WD_" + uid + "_" + Date.now();
 
-        const pchResponse = await fetch(PAYCHANGU_PAYOUT_URL, {
+        const pawaResponse = await fetch(PAWAPAY_URL, {
             method: 'POST',
             headers: {
-                "Authorization": `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+                "Authorization": `Bearer ${process.env.PAWAPAY_API_TOKEN}`,
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                amount: Number(amount),
+                payoutId: payoutId,
+                amount: String(amount) + ".00",
                 currency: "MWK",
-                mobile: phone,
-                reference: "MADA_WITHDRAW_" + uid,
-                network: phone.startsWith("26599") || phone.startsWith("26598") ? "airtel" : "tnm"
+                correspondent: network,
+                recipient: { type: "MSISDN", value: phone },
+                statementDescription: "Mada Game Withdrawal"
             })
         });
 
-        const pchData = await pchResponse.json();
+        const pawaData = await pawaResponse.json();
 
-        if (!pchResponse.ok || pchData.status !== 'success') {
-            return res.status(400).json({ success: false, message: pchData.message || JSON.stringify(pchData) });
+        if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
+            return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
+        } else {
+            return res.status(400).json({ success: false, message: pawaData.message || JSON.stringify(pawaData) });
         }
 
-        return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
-
     } catch (error) {
-        console.error("Withdraw Error:", error);
         return res.status(500).json({ success: false, message: error.message });
     }
 };
