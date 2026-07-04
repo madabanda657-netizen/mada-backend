@@ -44,17 +44,26 @@ module.exports = async (req, res) => {
                 amount: String(amount) + ".00",
                 currency: "MWK",
                 correspondent: network,
-                recipient: { type: "MSISDN", value: phone },
+                recipient: { 
+                    type: "MSISDN", 
+                    address: { value: phone } 
+                },
                 statementDescription: "Mada Game Withdrawal"
             })
         });
 
-        const pawaData = await pawaResponse.json();
+        const textResponse = await pawaResponse.text();
+        let pawaData;
+        try {
+            pawaData = JSON.parse(textResponse);
+        } catch (e) {
+            return res.status(400).json({ success: false, message: "PawaPay Payout Error: " + textResponse.substring(0, 100) });
+        }
 
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
         } else {
-            return res.status(400).json({ success: false, message: pawaData.message || JSON.stringify(pawaData) });
+            return res.status(400).json({ success: false, message: pawaData.detail || pawaData.message || JSON.stringify(pawaData) });
         }
 
     } catch (error) {
