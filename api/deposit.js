@@ -11,10 +11,12 @@ module.exports = async (req, res) => {
         const { uid, amount, phone } = req.body;
         if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
 
+        // PawaPay requires IDs to only contain letters, numbers, and hyphens.
+        const cleanUid = uid.replace(/[^a-zA-Z0-9]/g, '');
         const PAWAPAY_URL = "https://api.sandbox.pawapay.io/deposits";
         const network = phone.startsWith("26599") || phone.startsWith("26598") ? "AIRTEL_MALAWI" : "TNM_MPAMBA";
         
-        const depositId = "MADA_DEP_" + uid + "_" + Date.now();
+        const depositId = "MADA-DEP-" + cleanUid + "-" + Date.now();
 
         const pawaResponse = await fetch(PAWAPAY_URL, {
             method: 'POST',
@@ -47,7 +49,13 @@ module.exports = async (req, res) => {
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Prompt sent to phone." });
         } else {
-            const errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
+            // PawaPay returns errors inside an array called 'errors'
+            let errMsg = "Unknown PawaPay Error";
+            if (pawaData.errors && pawaData.errors.length > 0) {
+                errMsg = pawaData.errors[0].errorMessage + " - " + pawaData.errors[0].errorDetails;
+            } else {
+                errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
+            }
             return res.status(400).json({ success: false, message: errMsg });
         }
 
