@@ -48,6 +48,7 @@ module.exports = async (req, res) => {
                     type: "MSISDN", 
                     address: { value: phone } 
                 },
+                customerTimestamp: Date.now(),
                 statementDescription: "Mada Game Withdrawal"
             })
         });
@@ -63,7 +64,6 @@ module.exports = async (req, res) => {
         if (pawaResponse.status === 200 && pawaData.status === 'ACCEPTED') {
             return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
         } else {
-            // Extract the exact error message from PawaPay
             const errMsg = pawaData.errorMessage || pawaData.detail || pawaData.message || JSON.stringify(pawaData);
             return res.status(400).json({ success: false, message: errMsg });
         }
@@ -71,4 +71,4 @@ module.exports = async (req, res) => {
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
-};
+}; 
