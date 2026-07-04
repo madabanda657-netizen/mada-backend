@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 const admin = require('firebase-admin');
+const { randomUUID } = require('crypto');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -9,38 +10,27 @@ module.exports = async (req, res) => {
 
   try {
     const { uid, amount } = req.body;
-    if (!uid) return res.status(400).json({ success: false, message: "No UID received" });
+    if (!uid) return res.status(400).json({ success: false, message: "No UID" });
 
-    // init firebase once
     if (admin.apps.length === 0) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
+        credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
         databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
       });
     }
+    const user = (await admin.database().ref(`users/${uid}`).once('value')).val() || {};
 
-    const db = admin.database();
-    const userSnap = await db.ref(`users/${uid}`).once('value');
-    const userData = userSnap.val() || {};
-
-    // --- clean phone to 265XXXXXXXXX ---
-    let phone = String(userData.phone || '').replace(/[^0-9]/g, '');
+    let phone = String(user.phone || '').replace(/[^0-9]/g, '');
     if (phone.startsWith('0')) phone = '265' + phone.slice(1);
     if (!phone.startsWith('265')) phone = '265' + phone;
-    if (!phone) return res.status(400).json({ success: false, message: "User has no phone number on file." });
 
-    const cleanUid = uid.replace(/[^a-zA-Z0-9]/g, '');
-    const PAWAPAY_URL = "https://api.sandbox.pawapay.io/v2/payouts";
-
-    // correct Malawi correspondents
     const isAirtel = phone.startsWith('26599') || phone.startsWith('26598') || phone.startsWith('26588');
-    const network = isAirtel? 'AIRTEL_MWI' : 'TNM_MWI';
+    const provider = isAirtel? 'AIRTEL_MWI' : 'TNM_MWI';
 
-    const payoutId = `MADA-WD-${cleanUid}-${Date.now()}`;
-    const amountStr = String(Math.round(Number(amount))); // "50" not "50.00"
+    const payoutId = randomUUID();
+    const amountStr = String(Math.round(Number(amount)));
 
-    const pawaResponse = await fetch(PAWAPAY_URL, {
+    const resPawa = await fetch('https://api.sandbox.pawapay.io/v2/payouts', {
       method: 'POST',
       headers: {
         "Authorization": `Bearer ${process.env.PAWAPAY_API_TOKEN}`,
@@ -50,30 +40,25 @@ module.exports = async (req, res) => {
         payoutId,
         amount: amountStr,
         currency: "MWK",
-        correspondent: network,
         recipient: {
-          type: "MSISDN",
-          address: { value: phone }
+          type: "MMO",
+          accountDetails: {
+            phoneNumber: phone,
+            provider
+          }
         },
-        customerTimestamp: new Date().toISOString(),
-        statementDescription: "Mada Game Withdrawal"
+        customerMessage: "Mada Game Withdrawal"
       })
     });
 
-    const text = await pawaResponse.text();
-    let data;
-    try { data = JSON.parse(text); }
-    catch { return res.status(400).json({ success: false, message: "PawaPay: " + text.slice(0,150) }); }
-
-    if (pawaResponse.ok && (data.status === 'ACCEPTED' || data.status === 'SUBMITTED')) {
-      return res.status(200).json({ success: true, message: "Withdrawal sent to user's phone!" });
+    const data = await resPawa.json();
+    if (resPawa.ok && (data.status === 'ACCEPTED' || data.status === 'SUBMITTED')) {
+      return res.json({ success: true, message: "Withdrawal sent!" });
     }
+    const err = data.failureReason || data.errors?.[0];
+    return res.status(400).json({ success: false, message: err?.failureMessage || JSON.stringify(data) });
 
-    const err = data.errors?.[0];
-    const msg = err? `${err.errorMessage} - ${err.errorDetails}` : (data.message || text);
-    return res.status(400).json({ success: false, message: msg });
-
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
   }
-};
+}; 
