@@ -24,7 +24,7 @@ module.exports = async (req, res) => {
                 amount: String(amount),
                 currency: "MWK",
                 tx_ref: tx_ref,
-                return_url: "https://madagame.com", 
+                return_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/", 
                 callback_url: "https://mada-backend.vercel.app/api/webhook",
                 customization: {
                     title: "Mada Game Deposit",
@@ -47,4 +47,4 @@ module.exports = async (req, res) => {
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
-}; 
+};
