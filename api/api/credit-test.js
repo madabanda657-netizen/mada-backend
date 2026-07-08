@@ -13,5 +13,7 @@ export default async function handler(req, res) {
   if (!uid) return res.status(400).json({ error: 'uid required' });
   
   await db.ref(`leaderboard_all/${uid}/mwk`).transaction(c => (c || 0) + Number(amount));
-  res.json({ ok: true, credited: Number(amount), uid });
+  const snap = await db.ref(`leaderboard_all/${uid}/mwk`).once('value');
+  
+  res.json({ ok: true, uid, newBalance: snap.val() });
 }
