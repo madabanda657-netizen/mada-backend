@@ -5,9 +5,11 @@ module.exports = async (req, res) => {
         const event = req.body;
 
         if (event.status === 'success' && event.tx_ref) {
+            // The tx_ref looks like "MADA-username-1234567890"
             const refParts = event.tx_ref.split("-");
             if (refParts.length >= 3) {
-                const uid = refParts[1]; 
+                // The username is everything between the first part and the last part
+                const uid = refParts.slice(1, -1).join("-"); 
                 const amount = Number(event.amount);
 
                 if (uid && amount > 0) {
@@ -31,4 +33,4 @@ module.exports = async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: "Webhook failed" });
     }
-}; 
+};
