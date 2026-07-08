@@ -1,38 +1,22 @@
 import admin from 'firebase-admin';
-
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(
-      JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-    ),
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
     databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
   });
 }
-
 const db = admin.database();
 
 export default async function handler(req, res) {
-  // allow from browser
   res.setHeader('Access-Control-Allow-Origin', '*');
-  
-  const { uid, amount = 50 } = req.query;
+  const amount = Number(req.query.amount) || 50;
+  const username = "Mada_Banda"; // your real user node
 
-  if (!uid) {
-    return res.status(400).json({ error: 'uid required — add ?uid=YOUR_UID' });
-  }
+  // credit the place your app actually reads
+  await db.ref(`users/${username}/mwk`).transaction(c => (c || 0) + amount);
+  // also keep leaderboard in sync
+  await db.ref(`leaderboard_all/${username}/mwk`).transaction(c => (c || 0) + amount);
 
-  const amt = Number(amount) || 50;
-
-  // add to balance
-  await db.ref(`leaderboard_all/${uid}/mwk`).transaction(current => (current || 0) + amt);
-
-  // read new balance
-  const snap = await db.ref(`leaderboard_all/${uid}/mwk`).once('value');
-
-  return res.status(200).json({
-    ok: true,
-    uid,
-    credited: amt,
-    newBalance: snap.val()
-  });
+  const snap = await db.ref(`users/${username}/mwk`).once('value');
+  res.json({ ok: true, user: username, credited: amount, newBalance: snap.val() });
 }
