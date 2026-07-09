@@ -12,10 +12,10 @@ if (!admin.apps.length) {
 }
 const db = admin.database();
 
-// Get these UUIDs from: GET https://api.paychangu.com/mobile-money/payouts/operators
+// IDs you just fetched live from PayChangu
 const OPERATORS = {
-  airtel: process.env.AIRTEL_OPERATOR_ID || "20be6c20-adeb-4b5b-a7ba-0769820df4fb", // replace with yours
-  tnm: process.env.TNM_OPERATOR_ID || "YOUR_TNM_UUID_HERE"
+  airtel: "20be6c20-adeb-4b5b-a7ba-0769820df4fb",
+  tnm: "27494cb5-ba9e-437f-a114-4e7a7686bcca"
 };
 
 module.exports = async (req, res) => {
@@ -23,55 +23,54 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method!== 'POST') return res.status(405).json({ success:false });
+  if (req.method !== 'POST') return res.status(405).json({ success:false });
 
   try {
     const { uid, amount } = req.body || {};
     const amt = Number(amount);
 
-    if (!uid ||!amt || amt < 500) {
-      return res.status(400).json({ success:false, message:'Minimum withdrawal is MWK 500' });
+    // set to 50 for testing, later you can change to 500
+    if (!uid || !amt || amt < 50) {
+      return res.status(400).json({ success:false, message:'Minimum withdrawal is MWK 50' });
     }
 
-    // 1. load user & check balance atomically
-    const userRef = db.ref(`leaderboard_all/${uid}/mwk`);
-    let newBalance;
-    const deducted = await userRef.transaction(current => {
-      const bal = current || 0;
-      if (bal < amt) return; // abort
-      newBalance = bal - amt;
-      return newBalance;
-    });
-
-    if (!deducted.committed) {
-      return res.status(400).json({ success:false, message:'Insufficient balance' });
+    // 1. check balance from leaderboard_all
+    const balRef = db.ref(`leaderboard_all/${uid}/mwk`);
+    const balSnap = await balRef.once('value');
+    const bal = balSnap.val() || 0;
+    if (bal < amt) {
+      return res.status(400).json({ success:false, message:`Insufficient balance. You have MWK ${bal}` });
     }
 
-    // 2. get phone
+    // 2. deduct BOTH places to keep in sync
+    await db.ref(`leaderboard_all/${uid}/mwk`).transaction(v => (v||0) - amt);
+    await db.ref(`users/${uid}/mwk`).transaction(v => (v||0) - amt);
+
+    // 3. get phone
     const userSnap = await db.ref(`users/${uid}`).once('value');
     const user = userSnap.val() || {};
     let phone = (user.phone || '').replace(/\D/g, '');
     if (phone.startsWith('0')) phone = '265' + phone.slice(1);
     if (!phone.startsWith('265')) phone = '265' + phone;
 
-    const network = (phone.startsWith('26599') || phone.startsWith('26598'))? 'airtel' : 'tnm';
+    const isAirtel = phone.startsWith('26599') || phone.startsWith('26598');
+    const network = isAirtel ? 'airtel' : 'tnm';
     const operatorId = OPERATORS[network];
-    if (!operatorId) throw new Error('Operator ID not configured');
 
     const reference = `MADA-WD-${uid}-${Date.now()}`;
 
-    // 3. save pending payout (idempotency)
     await db.ref(`payouts/${reference}`).set({
       uid, amount: amt, phone, network,
       status: 'pending',
       createdAt: Date.now()
     });
 
-    // 4. call PayChangu correct endpoint
+    // 4. PayChangu payout - use your Vercel env name
+    const secret = process.env.PAYCHANGU_SECRET_KEY || process.env.PAYCHANGU_SECRET;
     const pchRes = await fetch("https://api.paychangu.com/mobile-money/payouts/initialize", {
       method: 'POST',
       headers: {
-        "Authorization": `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+        "Authorization": `Bearer ${secret}`,
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
@@ -79,25 +78,24 @@ module.exports = async (req, res) => {
         mobile: phone,
         mobile_money_operator_ref_id: operatorId,
         amount: String(amt),
-        charge_id: reference,
-        email: user.email || undefined,
-        first_name: uid
+        charge_id: reference
       })
     });
 
     const pchData = await pchRes.json();
+    console.log("Payout", reference, pchData);
 
     if (pchRes.ok && pchData.status === 'success') {
       await db.ref(`payouts/${reference}`).update({ status:'sent', pch: pchData, sentAt: Date.now() });
       return res.json({ success:true, message:`MWK ${amt} sent to ${phone}`, reference });
     }
 
-    // 5. failed – refund
-    await userRef.transaction(cur => (cur || 0) + amt);
+    // 5. failed – refund BOTH
+    await db.ref(`leaderboard_all/${uid}/mwk`).transaction(v => (v||0) + amt);
+    await db.ref(`users/${uid}/mwk`).transaction(v => (v||0) + amt);
     await db.ref(`payouts/${reference}`).update({ status:'failed', error: pchData, failedAt: Date.now() });
 
-    const errMsg = pchData.message || pchData.errorMessage || 'Payout rejected';
-    return res.status(400).json({ success:false, message: errMsg });
+    return res.status(400).json({ success:false, message: pchData.message || 'Payout rejected' });
 
   } catch (err) {
     console.error('withdraw error', err);
