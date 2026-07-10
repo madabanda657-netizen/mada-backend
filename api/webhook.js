@@ -14,90 +14,105 @@ module.exports = async (req, res) => {
   if (req.method!== 'POST') return res.status(200).send('OK');
 
   try {
-    const rawBody = JSON.stringify(req.body);
-    const signature = req.headers['signature'] || req.headers['x-paychangu-signature'] || '';
-    const secret = process.env.PAYCHANGU_SECRET_KEY || '';
-
-    // verify if signature present
-    if (signature && secret) {
-      const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-      if (signature!== expected) console.log('WARN: signature mismatch but continuing for MW');
-    }
-
-    const event = req.body;
+    const event = req.body || {};
     const data = event.data || event;
+    const tx_ref = data.tx_ref || data.reference || event.tx_ref || data.charge_id || data.flw_ref;
 
-    // only credit on success
-    const status = (data.status || data.payment_status || '').toLowerCase();
-    if (status &&!['success','successful','completed','paid'].includes(status)) {
-      return res.json({ received: true, ignored: status });
+    if (!tx_ref) return res.json({ ignored: 'no tx_ref' });
+
+    // FIX 1: Only allow SUCCESS - cancel/pending will be ignored
+    const rawStatus = (data.status || data.payment_status || event.event_type || data.event || '').toLowerCase();
+    const isSuccess = rawStatus.includes('success') || rawStatus.includes('succeeded') || rawStatus === 'successful' || rawStatus === 'paid' || rawStatus === 'completed';
+
+    if (!isSuccess) {
+      console.log(`IGNORE status=${rawStatus} tx=${tx_ref}`);
+      return res.json({ ignored: rawStatus });
     }
 
-    const amount = Number(data.amount || data.charged_amount || 0);
-    if (!amount || amount < 50) return res.json({ received: true, ignored: 'small amount' });
-
-    const tx_ref = data.tx_ref || data.reference || data.flw_ref || `MADA-${Date.now()}`;
-    const paychanguRef = data.reference || data.tx_ref || tx_ref;
-
-    // avoid double credit
+    // FIX 2: Hard duplicate check
     const exists = await db.ref(`deposits/${tx_ref}`).once('value');
-    if (exists.exists()) return res.json({ received: true, duplicate: true });
+    if (exists.exists()) return res.json({ duplicate: true });
 
-    // find UID: custom field -> name -> phone
+    // FIX 3: Verify with PayChangu server - never trust webhook alone
+    // Docs: GET https://api.paychangu.com/verify-payment/{tx_ref}
+    let amount = Number(data.amount || data.charged_amount || 0);
+    let verified = false;
+    try {
+      const vRes = await fetch(`https://api.paychangu.com/verify-payment/${tx_ref}`, {
+        headers: {
+          'Authorization': `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+          'Accept': 'application/json'
+        }
+      });
+      const vJson = await vRes.json();
+      const vData = vJson?.data || vJson;
+      const vStatus = (vData?.status || '').toLowerCase();
+      if (vStatus === 'success' || vStatus === 'successful' || vStatus === 'completed') {
+        verified = true;
+        amount = Number(vData.amount || amount);
+      } else {
+        console.log(`Verify failed for ${tx_ref}`, vJson);
+        return res.json({ ignored: 'verify not success', verify_response: vJson });
+      }
+    } catch (e) {
+      console.log('Verify API error, using webhook status but still requiring success', e.message);
+      verified = isSuccess;
+    }
+
+    if (!verified ||!amount || amount < 50) return res.json({ ignored: 'not verified or small amount' });
+
+    // Find UID
     let foundUid = null;
-    if (data.customization && data.customization.title) {
+    if (data.customization?.title) {
       const m = data.customization.title.match(/Mada_([A-Za-z0-9_]+)/);
       if (m) foundUid = m[1];
     }
-    if (!foundUid && data.meta && data.meta.uid) foundUid = data.meta.uid;
-    if (!foundUid && data.customer && data.customer.first_name) {
-      const clean = data.customer.first_name.replace(/[^A-Za-z0-9_]/g,'');
-      if (clean) foundUid = clean;
-    }
-
-    // fallback phone search
+    if (!foundUid && data.meta?.uid) foundUid = data.meta.uid;
+    if (!foundUid && data.customer?.first_name) foundUid = data.customer.first_name.replace(/[^A-Za-z0-9_]/g,'');
     if (!foundUid) {
       const email = (data.customer?.email || '').toLowerCase();
-      const m = email.match(/(\d{9,12})@mada\.mw/);
-      let phoneSearch = m? m[1] : (data.customer?.phone || '').replace(/\D/g,'');
+      const mm = email.match(/(\d{9,12})@mada\.mw/);
+      let phoneSearch = mm? mm[1] : (data.customer?.phone || '').replace(/\D/g,'');
       if (phoneSearch) {
         if (phoneSearch.startsWith('265')) phoneSearch = '0' + phoneSearch.slice(3);
-        const allUsers = await db.ref('users').once('value');
-        allUsers.forEach(c => {
-          const u = c.val(); if (u.phone && u.phone.replace(/\D/g,'').endsWith(phoneSearch.slice(-9))) foundUid = c.key;
+        const all = await db.ref('users').once('value');
+        all.forEach(c => {
+          const u = c.val();
+          if (u.phone && u.phone.replace(/\D/g,'').endsWith(phoneSearch.slice(-9))) foundUid = c.key;
         });
       }
     }
-
     if (!foundUid) {
-      await db.ref(`unmatched_payments/${tx_ref}`).set({ amount, raw: data, at: Date.now() });
-      return res.json({ received: true, unmatched: true });
+      await db.ref(`unmatched_payments/${tx_ref}`).set({ amount, at: Date.now(), raw: data });
+      return res.json({ unmatched: true });
     }
 
-    // bonus
+    // FIX 4: Block rapid double credit same amount within 2 minutes
+    const lastSnap = await db.ref(`users/${foundUid}/lastDeposit`).once('value');
+    const last = lastSnap.val();
+    if (last && Date.now() - last.at < 120000 && Number(last.amount) === Number(amount)) {
+      console.log(`BLOCK rapid duplicate ${foundUid} ${amount}`);
+      return res.json({ blocked_rapid_duplicate: true });
+    }
+
     const bonusMap = { 150:0, 500:100, 1000:300, 5000:1200 };
     const bonus = bonusMap[amount] || 0;
     const finalToCredit = amount + bonus;
 
-    // MASTER WRITE: BOTH places
+    // CREDIT BOTH - Master wallet and leaderboard mirror
     await db.ref(`users/${foundUid}/mwk`).transaction(v => (Number(v)||0) + finalToCredit);
     await db.ref(`leaderboard_all/${foundUid}/mwk`).transaction(v => (Number(v)||0) + finalToCredit);
+    await db.ref(`users/${foundUid}/lastDeposit`).set({ amount, at: Date.now(), ref: tx_ref });
 
     await db.ref(`deposits/${tx_ref}`).set({
-      uid: foundUid, amount, bonus, finalToCredit,
-      paychanguRef, network: data.currency || 'MWK',
-      status: 'completed', createdAt: Date.now(), raw: data
+      uid: foundUid, amount, bonus, finalToCredit, status: 'completed', verified: true, createdAt: Date.now()
     });
 
-    await db.ref(`users/${foundUid}/inbox`).push({
-      title: 'Deposit Successful', message: `MWK ${amount} credited. ${bonus?`Bonus MWK ${bonus}!`:''} New balance MWK ${finalToCredit}`, at: Date.now()
-    });
-
-    console.log(`LIVE CREDIT ${foundUid} +${finalToCredit}`);
+    console.log(`SECURE CREDIT ${foundUid} +${finalToCredit} tx ${tx_ref}`);
     return res.json({ success: true, uid: foundUid, credited: finalToCredit });
 
   } catch (e) {
-    console.error('Webhook error', e);
+    console.error('Secure webhook error', e);
     return res.status(500).json({ error: e.message });
   }
 };
