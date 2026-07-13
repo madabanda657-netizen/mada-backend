@@ -18,21 +18,26 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method!== 'POST') return res.status(405).json({ success:false, message:'POST only' });
+  if (req.method !== 'POST') return res.status(405).json({ success:false, message:'POST only' });
 
   const { uid, amount } = req.body || {};
   const amt = Number(amount);
-  if (!uid ||!amt || amt < 50) return res.status(400).json({ success:false, message:'Min withdraw 50' });
+  if (!uid || !amt || amt < 50) return res.status(400).json({ success:false, message:'Min withdraw 50' });
 
   let deducted = false;
   let lbBefore = 0;
   let userBefore = 0;
 
   try {
-    // CHECK users/ - master wallet
     const userSnap = await db.ref(`users/${uid}`).once('value');
     const userData = userSnap.val();
     if (!userData) return res.status(404).json({ success:false, message:'User not found' });
+
+    // GET USER PHONE - works for every user, not only you
+    let rawPhone = (userData.phone || userData.phoneNumber || '').toString().replace(/\D/g,'');
+    if (!rawPhone) {
+      return res.status(400).json({ success:false, message:'No phone number on profile. Please update phone in Profile.' });
+    }
 
     userBefore = Number(userData.mwk || 0);
     const lbSnap = await db.ref(`leaderboard_all/${uid}/mwk`).once('value');
@@ -42,23 +47,37 @@ module.exports = async (req, res) => {
       return res.status(400).json({ success:false, message:`Not enough. Balance MWK ${userBefore}` });
     }
 
-    // DEDUCT both
+    // DEDUCT
     await db.ref(`users/${uid}/mwk`).set(userBefore - amt);
     await db.ref(`leaderboard_all/${uid}/mwk`).set(Math.max(0, lbBefore - amt));
     deducted = true;
 
-    let phone = (userData.phone || '').replace(/\D/g,'');
-    if (!phone) phone = '0998699334';
-    if (phone.startsWith('0')) phone = '265' + phone.slice(1);
-    if (!phone.startsWith('265')) phone = '265' + phone;
+    // --- FIXED: Normalize to both formats ---
+    let intl = rawPhone;
+    if (intl.startsWith('0')) intl = '265' + intl.slice(1);
+    if (intl.startsWith('+265')) intl = intl.slice(1);
+    if (!intl.startsWith('265')) intl = '265' + intl;
 
-    const isAirtel = phone.startsWith('26599') || phone.startsWith('26598');
-    const operatorId = isAirtel? OPERATORS.airtel : OPERATORS.tnm;
+    // PayChangu wants 0 + 9 digits, e.g. 0998699334
+    let local = intl;
+    if (local.startsWith('265')) local = '0' + local.slice(3);
+
+    if (local.length !== 10) {
+      throw new Error(`Invalid phone format: ${local}. Expected 0XXXXXXXXX`);
+    }
+
+    // Operator detection for Malawi
+    // TNM = 088, 0887 | Airtel = 099, 098, 089
+    const isTnm = intl.startsWith('26588');
+    const isAirtel = !isTnm; 
+    const operatorId = isTnm ? OPERATORS.tnm : OPERATORS.airtel;
+    const networkName = isTnm ? 'TNM Mpamba' : 'Airtel Money';
+
     if (!operatorId) throw new Error('Operator ID not configured');
 
     const refId = `MADA-WD-${uid}-${Date.now()}`;
 
-    // TRY AUTO PayChangu
+    // TRY AUTO
     try {
       const pResp = await fetch('https://api.paychangu.com/mobile-money/payouts/initialize', {
         method: 'POST',
@@ -68,43 +87,49 @@ module.exports = async (req, res) => {
           'Accept': 'application/json'
         },
         body: JSON.stringify({
-          mobile: phone,
+          mobile: local, // <-- FIXED: send 099... not 265...
           mobile_money_operator_ref_id: operatorId,
           amount: String(amt),
           charge_id: refId
         })
       });
+      
       const pData = await pResp.json().catch(()=>({}));
+      console.log('PayChangu raw response:', JSON.stringify(pData));
 
       if (pResp.ok && (pData.status === 'success' || pData.data)) {
         await db.ref(`withdraw_requests/${refId}`).set({
-          uid, amount: amt, phone, network: isAirtel?'Airtel Money':'TNM Mpamba',
+          uid, amount: amt, phone: local, intl_phone: intl, network: networkName,
           status: 'sent', paychangu_ref: pData.data?.data?.ref_id || refId, createdAt: Date.now()
         });
-        return res.json({ success:true, auto:true, message:`MWK ${amt} sent to ${phone}` });
+        return res.json({ success:true, auto:true, message:`MWK ${amt} sent to ${local}` });
       }
 
-      // AUTO FAILED -> MANUAL FALLBACK, NO REFUND
-      const errMsg = typeof pData.message === 'string'? pData.message : JSON.stringify(pData.message || pData);
-      console.log('Auto failed, switching to manual:', errMsg);
+      // Auto failed -> REFUND so user can retry, and show real reason
+      const errMsg = pData.message ? JSON.stringify(pData.message) : JSON.stringify(pData);
+      console.log('Auto failed:', errMsg);
+
+      // REFUND for auto fail during testing
+      await db.ref(`users/${uid}/mwk`).set(userBefore);
+      await db.ref(`leaderboard_all/${uid}/mwk`).set(lbBefore);
+      deducted = false;
 
       await db.ref(`withdraw_requests/${refId}`).set({
-        uid, amount: amt, phone, network: isAirtel?'Airtel Money':'TNM Mpamba',
-        status: 'pending_manual', paychangu_error: errMsg, createdAt: Date.now()
+        uid, amount: amt, phone: local, network: networkName,
+        status: 'failed', paychangu_error: errMsg, createdAt: Date.now()
       });
-      return res.json({ success:true, manual:true, message:`Request received. Admin will send MWK ${amt} within 1 hour`, reference: refId });
+      return res.status(400).json({ success:false, message:`PayChangu rejected: ${errMsg}` });
 
     } catch (autoErr) {
-      // Network error -> manual fallback too
-      await db.ref(`withdraw_requests/${refId}`).set({
-        uid, amount: amt, phone, network: isAirtel?'Airtel Money':'TNM Mpamba',
-        status: 'pending_manual', error: autoErr.message, createdAt: Date.now()
-      });
-      return res.json({ success:true, manual:true, message:`Request received. Admin will send MWK ${amt}` });
+      if (deducted) {
+        await db.ref(`users/${uid}/mwk`).set(userBefore);
+        await db.ref(`leaderboard_all/${uid}/mwk`).set(lbBefore);
+      }
+      console.error('Auto exception', autoErr);
+      return res.status(500).json({ success:false, message: autoErr.message });
     }
 
   } catch (err) {
-    // ONLY refund on critical error before payout
     if (deducted) {
       await db.ref(`users/${uid}/mwk`).set(userBefore);
       await db.ref(`leaderboard_all/${uid}/mwk`).set(lbBefore);
