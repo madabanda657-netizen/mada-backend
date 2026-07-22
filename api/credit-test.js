@@ -1,22 +1,18 @@
-import admin from 'firebase-admin';
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
-    databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
-  });
-}
-const db = admin.database();
-
-export default async function handler(req, res) {
+// api/credit-test.js – simple test to check if PayChangu secret is working
+module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  const amount = Number(req.query.amount) || 50;
-  const username = "Mada_Banda"; // your real user node
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // credit the place your app actually reads
-  await db.ref(`users/${username}/mwk`).transaction(c => (c || 0) + amount);
-  // also keep leaderboard in sync
-  await db.ref(`leaderboard_all/${username}/mwk`).transaction(c => (c || 0) + amount);
-
-  const snap = await db.ref(`users/${username}/mwk`).once('value');
-  res.json({ ok: true, user: username, credited: amount, newBalance: snap.val() });
-}
+  try {
+    const r = await fetch("https://api.paychangu.com/mobile-money", {
+      headers: {
+        "Authorization": `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+        "Accept": "application/json"
+      }
+    });
+    const data = await r.json();
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}; 
