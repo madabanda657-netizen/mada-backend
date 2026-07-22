@@ -1,62 +1,52 @@
-// api/deposit.js
 const fetch = require('node-fetch');
-const admin = require('firebase-admin');
-
-// --- init Firebase once ---
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(
-      JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-    ),
-    databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
-  });
-}
-const db = admin.database();
+const { admin, db, verifyIdToken } = require('./_lib/firebaseAdmin');
 
 module.exports = async (req, res) => {
-  // CORS for your front-end
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ success:false, message:'Method not allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
 
   try {
-    const { uid, amount } = req.body || {};
-
-    // 1. validate
-    if (!uid || typeof uid !== 'string') {
-      return res.status(400).json({ success:false, message:'Missing uid' });
+    // 1. Authenticate user via Firebase ID token
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, message: 'Missing or invalid token' });
     }
+    const token = authHeader.split('Bearer ')[1];
+    const decoded = await verifyIdToken(token);
+    const uid = decoded.uid;
+
+    const { amount } = req.body || {};
     const amt = Number(amount);
     if (!amt || amt < 50) {
-      return res.status(400).json({ success:false, message:'Amount must be >= 50 MWK' });
+      return res.status(400).json({ success: false, message: 'Amount must be >= 50 MWK' });
     }
 
-    // 2. get user email (optional, for PayChangu receipt)
+    // 2. Get user data from Realtime DB
     const userSnap = await db.ref(`users/${uid}`).once('value');
     const user = userSnap.val() || {};
-    
-    // 3. create unique reference
+
+    // 3. Unique reference
     const tx_ref = `MADA-${uid}-${Date.now()}`;
 
-    // 4. save pending (for idempotency & webhook)
+    // 4. Save pending deposit record (for idempotency)
     await db.ref(`pending_deposits/${tx_ref}`).set({
       uid,
       amount: amt,
       status: 'pending',
-      createdAt: Date.now()
+      createdAt: admin.database.ServerValue.TIMESTAMP,
     });
 
-    // 5. call PayChangu
+    // 5. Call PayChangu to create payment link
     const payload = {
       amount: String(amt),
       currency: "MWK",
       tx_ref,
-      // pass uid so webhook doesn't need to parse tx_ref
       meta: { uid },
-      // browser returns here after payment – your GitHub Pages site
-      callback_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/",
+      callback_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/", // your frontend URL
       return_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/",
       customization: {
         title: "Mada Game Deposit",
@@ -64,7 +54,7 @@ module.exports = async (req, res) => {
       }
     };
     if (user.email) payload.email = user.email;
-    if (user.displayName) payload.first_name = user.displayName;
+    if (user.fullname || user.displayName) payload.first_name = user.fullname || user.displayName;
 
     const pchRes = await fetch("https://api.paychangu.com/payment", {
       method: 'POST',
@@ -86,8 +76,8 @@ module.exports = async (req, res) => {
       });
     }
 
-    // PayChangu error – clean up pending
-    await db.ref(`pending_deposits/${tx_ref}`).update({ status:'failed', error:pchData });
+    // PayChangu error – mark pending as failed
+    await db.ref(`pending_deposits/${tx_ref}`).update({ status: 'failed', error: pchData });
     return res.status(400).json({
       success: false,
       message: pchData.message || 'PayChangu error',
@@ -95,7 +85,7 @@ module.exports = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('deposit error', err);
-    return res.status(500).json({ success:false, message: err.message });
+    console.error('Deposit error:', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
-};
+}; 
