@@ -1,91 +1,76 @@
-const fetch = require('node-fetch');
-const { admin, db, verifyIdToken } = require('./_lib/firebaseAdmin');
+const admin = require('firebase-admin');
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+    databaseURL: "https://apple-green-ded09-default-rtdb.firebaseio.com"
+  });
+}
+const db = admin.database();
 
 module.exports = async (req, res) => {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ success: false, message: 'Method not allowed' });
+
+  const { uid, amount, phone } = req.body || {};
+  const amt = Number(amount);
+  if (!uid || !amt || amt < 50) return res.status(400).json({ success:false, message:'Min deposit 50' });
 
   try {
-    // 1. Authenticate user via Firebase ID token
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, message: 'Missing or invalid token' });
-    }
-    const token = authHeader.split('Bearer ')[1];
-    const decoded = await verifyIdToken(token);
-    const uid = decoded.uid;
-
-    const { amount } = req.body || {};
-    const amt = Number(amount);
-    if (!amt || amt < 50) {
-      return res.status(400).json({ success: false, message: 'Amount must be >= 50 MWK' });
-    }
-
-    // 2. Get user data from Realtime DB
     const userSnap = await db.ref(`users/${uid}`).once('value');
-    const user = userSnap.val() || {};
+    const userData = userSnap.val();
+    if (!userData) return res.status(404).json({ success:false, message:'User not found' });
 
-    // 3. Unique reference
-    const tx_ref = `MADA-${uid}-${Date.now()}`;
+    let rawPhone = (phone || userData.phone || '').toString().replace(/\D/g,'');
+    if (!rawPhone) return res.status(400).json({ success:false, message:'No phone' });
+    
+    let intl = rawPhone;
+    if (intl.startsWith('0')) intl = '265' + intl.slice(1);
+    if (intl.startsWith('+265')) intl = intl.slice(1);
+    if (!intl.startsWith('265')) intl = '265' + intl;
+    const local = '0' + intl.slice(3);
 
-    // 4. Save pending deposit record (for idempotency)
-    await db.ref(`pending_deposits/${tx_ref}`).set({
-      uid,
-      amount: amt,
-      status: 'pending',
-      createdAt: admin.database.ServerValue.TIMESTAMP,
-    });
+    const txRef = `MADA-DEP-${uid}-${Date.now()}`;
 
-    // 5. Call PayChangu to create payment link
-    const payload = {
-      amount: String(amt),
-      currency: "MWK",
-      tx_ref,
-      meta: { uid },
-      callback_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/", // your frontend URL
-      return_url: "https://madabanda657-netizen.github.io/Mada-checker-earn/",
-      customization: {
-        title: "Mada Game Deposit",
-        description: `Deposit MWK ${amt}`
-      }
-    };
-    if (user.email) payload.email = user.email;
-    if (user.fullname || user.displayName) payload.first_name = user.fullname || user.displayName;
-
-    const pchRes = await fetch("https://api.paychangu.com/payment", {
+    // Create PayChangu payment link
+    const pRes = await fetch('https://api.paychangu.com/payment', {
       method: 'POST',
       headers: {
-        "Authorization": `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        'Authorization': `Bearer ${process.env.PAYCHANGU_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        amount: String(amt),
+        currency: 'MWK',
+        email: userData.email || `${local}@mada.com`,
+        first_name: userData.username || 'Player',
+        last_name: 'Mada',
+        tx_ref: txRef,
+        callback_url: `https://mada-backend.vercel.app/api/webhook`,
+        return_url: `https://mada-game.web.app/wallet?deposit=${txRef}`,
+        customization: {
+          title: 'Mada Deposit',
+          description: `Deposit MWK ${amt}`
+        }
+      })
     });
 
-    const pchData = await pchRes.json();
+    const pData = await pRes.json();
+    console.log('Deposit init:', JSON.stringify(pData));
 
-    if (pchRes.ok && pchData.status === 'success' && pchData.data?.checkout_url) {
-      return res.status(200).json({
-        success: true,
-        checkout_url: pchData.data.checkout_url,
-        tx_ref
+    if (pRes.ok && pData.data && pData.data.checkout_url) {
+      await db.ref(`pending_deposits/${txRef}`).set({
+        uid, amount: amt, phone: local, status: 'pending', createdAt: Date.now()
       });
+      return res.json({ success:true, checkout_url: pData.data.checkout_url, tx_ref: txRef });
     }
 
-    // PayChangu error – mark pending as failed
-    await db.ref(`pending_deposits/${tx_ref}`).update({ status: 'failed', error: pchData });
-    return res.status(400).json({
-      success: false,
-      message: pchData.message || 'PayChangu error',
-      details: pchData
-    });
+    return res.status(400).json({ success:false, message: JSON.stringify(pData) });
 
-  } catch (err) {
-    console.error('Deposit error:', err);
-    return res.status(500).json({ success: false, message: err.message });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success:false, message: e.message });
   }
 }; 
